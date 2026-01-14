@@ -151,7 +151,8 @@ void receive_data(struct connection *conn)
 	/* TODO: Receive message on socket.
 	 * Store message in recv_buffer in struct connection.
 	 */
-	ssize_t bytes_recv = recv(conn->sockfd, conn->recv_buffer, BUFSIZ, 0);
+	ssize_t bytes_recv = recv(conn->sockfd, conn->recv_buffer + conn->recv_len,
+							  BUFSIZ - conn->recv_len, 0);
 
 	if (bytes_recv <= 0) {
 		w_epoll_remove_ptr(epollfd, conn->sockfd, conn);
@@ -159,7 +160,7 @@ void receive_data(struct connection *conn)
 		return;
 	}
 
-	conn->recv_len = bytes_recv;
+	conn->recv_len += bytes_recv;
 	conn->state = STATE_RECEIVING_DATA;
 }
 
@@ -168,7 +169,8 @@ int connection_open_file(struct connection *conn)
 	/* TODO: Open file and update connection fields. */
 	char path[512];
 
-	sprintf(path, ".%s", conn->request_path);
+	strcpy(path, ".");
+	strncat(path, conn->request_path, sizeof(path) - strlen(path) - 1);
 
 	conn->fd = open(path, O_RDONLY);
 	if (conn->fd < 0)
@@ -180,6 +182,14 @@ int connection_open_file(struct connection *conn)
 	conn->file_size = st.st_size;
 	conn->file_pos = 0;
 
+	return 0;
+}
+
+static int aws_on_headers_complete_cb(http_parser *p)
+{
+	struct connection *conn = (struct connection *)p->data;
+
+	conn->state = STATE_REQUEST_RECEIVED;
 	return 0;
 }
 
@@ -214,6 +224,8 @@ int parse_header(struct connection *conn)
 	http_parser_settings settings = {0};
 
 	settings.on_path = aws_on_path_cb;
+	settings.on_headers_complete = aws_on_headers_complete_cb;
+
 	size_t parsed = http_parser_execute(&parser, &settings, conn->recv_buffer, conn->recv_len);
 
 	if (parsed == conn->recv_len)
@@ -224,14 +236,11 @@ int parse_header(struct connection *conn)
 enum connection_state connection_send_static(struct connection *conn)
 {
 	/* TODO: Send static data using sendfile(2). */
-	off_t offset = conn->file_pos;
-	ssize_t sent = sendfile(conn->sockfd, conn->fd, &offset,
+	ssize_t sent = sendfile(conn->sockfd, conn->fd, (off_t *)&conn->file_pos,
 						conn->file_size - conn->file_pos);
 
 	if (sent < 0)
 		return STATE_CONNECTION_CLOSED;
-
-	conn->file_pos += sent;
 
 	if (conn->file_pos == conn->file_size)
 		return STATE_DATA_SENT;
@@ -292,7 +301,6 @@ void handle_output(struct connection *conn)
 	 * completion of an asynchronous I/O operation or invalid requests.
 	 */
 	if (connection_get_resource_type(conn) == RESOURCE_TYPE_STATIC) {
-		/* First send the header from send_buffer */
 		if (conn->send_pos < conn->send_len) {
 			int done = connection_send_data(conn);
 
@@ -301,12 +309,11 @@ void handle_output(struct connection *conn)
 				connection_remove(conn);
 				return;
 			}
-			/* Header not fully sent yet, wait for next EPOLLOUT */
+
 			if (done == 0)
 				return;
 		}
 
-		/* Header fully sent, now send file via sendfile */
 		enum connection_state st = connection_send_static(conn);
 
 		if (st == STATE_DATA_SENT || st == STATE_CONNECTION_CLOSED) {
@@ -322,7 +329,6 @@ void handle_output(struct connection *conn)
 		connection_remove(conn);
 	}
 }
-
 
 void handle_client(uint32_t event, struct connection *conn)
 {
