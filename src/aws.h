@@ -66,6 +66,8 @@ struct connection {
 	size_t send_pos;
 	size_t file_pos;
 	size_t async_read_len;
+	// am adaugat eu
+	size_t header_len;
 
 	/* HTTP request path */
 	int have_path;

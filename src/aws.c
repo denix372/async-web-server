@@ -30,6 +30,7 @@ static int listenfd;
 static int epollfd;
 
 static io_context_t ctx;
+static int efd;
 
 static int aws_on_path_cb(http_parser *p, const char *buf, size_t len)
 {
@@ -50,6 +51,8 @@ static enum resource_type connection_get_resource_type(struct connection *conn)
 
 	if (strncmp(conn->request_path, "/static/", 8) == 0)
 		return RESOURCE_TYPE_STATIC;
+	if (strncmp(conn->request_path, "/dynamic/", 9) == 0)
+		return RESOURCE_TYPE_DYNAMIC;
 
 	return RESOURCE_TYPE_NONE;
 }
@@ -111,6 +114,33 @@ void connection_start_async_io(struct connection *conn)
 	/* TODO: Start asynchronous operation (read from file).
 	 * Use io_submit(2) & friends for reading data asynchronously.
 	 */
+	if (connection_get_resource_type(conn) != RESOURCE_TYPE_DYNAMIC)
+		return;
+
+	conn->header_len = snprintf(conn->send_buffer, BUFSIZ,
+		"HTTP/1.1 200 OK\r\n"
+		"Content-Length: %ld\r\n"
+		"\r\n", conn->file_size);
+
+	conn->send_len = conn->header_len;
+	conn->send_pos = 0;
+
+	size_t available_space = BUFSIZ - conn->header_len;
+	size_t read_size = conn->file_size < available_space ? conn->file_size : available_space;
+
+	memset(&conn->iocb, 0, sizeof(struct iocb));
+	conn->piocb[0] = &conn->iocb;
+
+	io_prep_pread(conn->piocb[0], conn->fd,
+		conn->send_buffer + conn->header_len, read_size, 0);
+
+	conn->piocb[0]->data = conn;
+	io_set_eventfd(conn->piocb[0], efd);
+
+	int rc = io_submit(ctx, 1, conn->piocb);
+
+	DIE(rc < 0, "io_submit");
+	conn->state = STATE_ASYNC_ONGOING;
 }
 
 void connection_remove(struct connection *conn)
@@ -135,6 +165,13 @@ void handle_new_connection(void)
 	DIE(sockfd < 0, "accept");
 
 	/* TODO: Set socket to be non-blocking. */
+	int flags = fcntl(sockfd, F_GETFL, 0);
+
+	DIE(flags < 0, "fcntl F_GETFL");
+
+	rc = fcntl(sockfd, F_SETFL, flags | O_NONBLOCK);
+
+	DIE(rc < 0, "fcntl F_SETFL");
 
 	/* TODO: Instantiate new connection handler. */
 	conn = connection_create(sockfd);
@@ -198,6 +235,17 @@ void connection_complete_async_io(struct connection *conn)
 	/* TODO: Complete asynchronous operation; operation returns successfully.
 	 * Prepare socket for sending.
 	 */
+
+	/* Calculate how much was actually read */
+	size_t available_space = BUFSIZ - conn->header_len;
+	size_t read_size = conn->file_size < available_space ? conn->file_size : available_space;
+
+	conn->send_len = conn->header_len + read_size;
+	conn->send_pos = 0;
+	conn->state = STATE_SENDING_DATA;
+
+	close(conn->fd);
+	w_epoll_update_ptr_inout(epollfd, conn->sockfd, conn);
 }
 
 int parse_header(struct connection *conn)
@@ -272,6 +320,9 @@ int connection_send_dynamic(struct connection *conn)
 	/* TODO: Read data asynchronously.
 	 * Returns 0 on success and -1 on error.
 	 */
+	int rc = connection_send_data(conn);
+	if (rc < 0)
+		return -1;
 	return 0;
 }
 
@@ -288,8 +339,18 @@ void handle_input(struct connection *conn)
 			connection_prepare_send_404(conn);
 		else
 			connection_prepare_send_reply_header(conn);
-	} else {
-		connection_prepare_send_reply_header(conn);
+
+		w_epoll_update_ptr_inout(epollfd, conn->sockfd, conn);
+		return;
+
+	} else if (connection_get_resource_type(conn) == RESOURCE_TYPE_DYNAMIC) {
+		if (connection_open_file(conn) < 0) {
+			connection_prepare_send_404(conn);
+			w_epoll_update_ptr_inout(epollfd, conn->sockfd, conn);
+			return;
+		}
+		connection_start_async_io(conn);
+		return;
 	}
 
 	w_epoll_update_ptr_inout(epollfd, conn->sockfd, conn);
@@ -323,8 +384,18 @@ void handle_output(struct connection *conn)
 		return;
 	}
 
-	/* Non-static: just send from send_buffer */
-	if (connection_send_data(conn) == 1) {
+	/* For dynamic resources, only send if we're in the sending state */
+	if (conn->state != STATE_SENDING_DATA)
+		return;
+
+	int rc = connection_send_data(conn);
+	if (rc < 0) {
+		w_epoll_remove_ptr(epollfd, conn->sockfd, conn);
+		connection_remove(conn);
+		return;
+	}
+
+	if (rc == 1) {
 		w_epoll_remove_ptr(epollfd, conn->sockfd, conn);
 		connection_remove(conn);
 	}
@@ -344,11 +415,19 @@ int main(void)
 	//ne dam seama cum sa initilizam serverul
 
 	/* TODO: Initialize asynchronous operations. */
-	rc = 0;
+	memset(&ctx, 0, sizeof(ctx));
+	rc = io_setup(128, &ctx);
+	DIE(rc < 0, "io_setup");
 
 	/* TODO: Initialize multiplexing. */
 	epollfd = w_epoll_create();
 	DIE(epollfd < 0, "w_epoll_create");
+
+	efd = eventfd(0, EFD_NONBLOCK);
+	DIE(efd < 0, "eventfd");
+
+	rc = w_epoll_add_fd_in(epollfd, efd);
+	DIE(rc < 0, "w_epoll_add_fd_in");
 
 	/* TODO: Create server socket. */
 	listenfd = tcp_create_listener(AWS_LISTEN_PORT,
@@ -379,6 +458,20 @@ int main(void)
 			dlog(LOG_DEBUG, "New connection\n");
 			if (rev.events & EPOLLIN)
 				handle_new_connection();
+		} else if (rev.data.fd == efd) {
+			unsigned long int cnt;
+			ssize_t r = read(efd, &cnt, sizeof(cnt));
+			if (r < 0 && errno != EAGAIN)
+				DIE(1, "read eventfd");
+
+			struct io_event events[128];
+			int nevents = io_getevents(ctx, 1, 128, events, NULL);
+			DIE(nevents < 0, "io_getevents");
+
+			for (int i = 0; i < nevents; i++) {
+				struct connection *conn = events[i].data;
+				connection_complete_async_io(conn);
+			}
 		} else {
 			struct connection *conn = rev.data.ptr;
 
