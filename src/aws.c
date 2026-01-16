@@ -248,16 +248,19 @@ int connection_open_file(struct connection *conn)
 	conn->fd = open(path, O_RDONLY);
 	free(path);
 
-	if (conn->fd < 0)
-		return -1;
+	int status = -1;
 
-	struct stat st;
+	if (conn->fd >= 0) {
+		struct stat st;
 
-	fstat(conn->fd, &st);
-	conn->file_size = st.st_size;
-	conn->file_pos = 0;
+		if (fstat(conn->fd, &st) == 0) {
+			conn->file_size = st.st_size;
+			conn->file_pos = 0;
+			status = 0;
+		}
+	}
 
-	return 0;
+	return status;
 }
 
 static int aws_on_headers_complete_cb(http_parser *p)
@@ -323,16 +326,18 @@ int connection_send_data(struct connection *conn)
 	 */
 	ssize_t sent = send(conn->sockfd, conn->send_buffer + conn->send_pos,
 						conn->send_len - conn->send_pos, 0);
-	if (sent < 0)
-		return -1;
+	int ret = 0;
 
-	conn->send_pos += sent;
+	if (sent < 0) {
+		ret = -1;
+	} else {
+		conn->send_pos += sent;
+		if (conn->send_pos == conn->send_len)
+			ret = 1;
+	}
 
-	if (conn->send_pos == conn->send_len)
-		return 1;
-	return 0;
+	return ret;
 }
-
 
 int connection_send_dynamic(struct connection *conn)
 {
@@ -343,7 +348,6 @@ int connection_send_dynamic(struct connection *conn)
 		return -1;
 	return 0;
 }
-
 
 void handle_input(struct connection *conn)
 {
