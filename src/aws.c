@@ -465,6 +465,7 @@ int main(void)
 				handle_new_connection();
 		} else {
 			struct connection *conn = rev.data.ptr;
+
 			handle_client(rev.events, conn);
 		}
 	}
