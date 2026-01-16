@@ -352,6 +352,11 @@ void handle_input(struct connection *conn)
 	/* TODO: Handle input information: may be a new message or notification of
 	 * completion of an asynchronous I/O operation.
 	 */
+
+	if (conn->state == STATE_SENDING_HEADER ||
+		conn->state == STATE_SENDING_DATA ||
+		conn->state == STATE_SENDING_404)
+		return;
 	receive_data(conn);
 	parse_header(conn);
 
@@ -475,13 +480,15 @@ int main(void)
 			if (rev.events & EPOLLIN)
 				handle_new_connection();
 		} else if (rev.data.fd == efd) {
-			unsigned long int cnt;
+			unsigned long cnt;
 			ssize_t r = read(efd, &cnt, sizeof(cnt));
+
 			if (r < 0 && errno != EAGAIN)
 				DIE(1, "read eventfd");
 
 			struct io_event events[128];
 			int nevents = io_getevents(ctx, 1, 128, events, NULL);
+
 			DIE(nevents < 0, "io_getevents");
 
 			for (int i = 0; i < nevents; i++) {
