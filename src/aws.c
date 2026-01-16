@@ -406,9 +406,10 @@ void handle_client(uint32_t event, struct connection *conn)
 	 */
 	unsigned int in = event & EPOLLIN;
 	unsigned int out = event & EPOLLOUT;
+
 	if (in)
 		handle_input(conn);
-	else if (out)
+	if (out)
 		handle_output(conn);
 }
 
@@ -462,28 +463,9 @@ int main(void)
 			dlog(LOG_DEBUG, "New connection\n");
 			if (rev.events & EPOLLIN)
 				handle_new_connection();
-		} else if (rev.data.fd == efd) {
-			unsigned long cnt;
-			ssize_t r = read(efd, &cnt, sizeof(cnt));
-
-			struct io_event *events = calloc(128, sizeof(struct io_event));
-			int nevents = io_getevents(ctx, 1, 128, events, NULL);
-
-			for (int i = 0; i < nevents; i++) {
-				struct connection *conn = events[i].data;
-
-				connection_complete_async_io(conn);
-			}
-			free(events);
-
 		} else {
 			struct connection *conn = rev.data.ptr;
-
-			if (rev.events & EPOLLIN)
-				handle_input(conn);
-
-			if (rev.events & EPOLLOUT)
-				handle_output(conn);
+			handle_client(rev.events, conn);
 		}
 	}
 
