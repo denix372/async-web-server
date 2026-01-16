@@ -99,7 +99,12 @@ static void connection_prepare_send_404(struct connection *conn)
 struct connection *connection_create(int sockfd)
 {
 	/* TODO: Initialize connection structure on given socket. */
-	struct connection *conn = calloc(1, sizeof(struct connection *));
+	struct connection *conn = calloc(1, sizeof(*conn));
+
+	if (conn == NULL) {
+		perror("calloc");
+		exit(EXIT_FAILURE);
+	}
 
 	conn->sockfd = sockfd;
 	conn->fd = -1;
@@ -192,8 +197,6 @@ void handle_new_connection(void)
 		perror("w_epoll_add_in");
 		exit(EXIT_FAILURE);
 	}
-
-	/* TODO: Initialize HTTP_REQUEST parser. */
 }
 
 void receive_data(struct connection *conn)
@@ -433,7 +436,7 @@ int main(void)
 	// ne dam seama cum sa initilizam serverul
 
 	/* TODO: Initialize asynchronous operations. */
-	memset(&ctx, 0, sizeof(io_context_t));
+	memset(&ctx, 0, sizeof(ctx));
 	rc = io_setup(128, &ctx);
 	if (rc < 0) {
 		perror("io_setup");
