@@ -68,7 +68,6 @@ static enum resource_type connection_get_resource_type(struct connection *conn)
 
 static void connection_prepare_send_reply_header(struct connection *conn)
 {
-	/* Prepare a plain 200 OK header with explicit connection close. */
 	char *p = conn->send_buffer;
 
 	p = stpcpy(p, fmt_200);
@@ -263,7 +262,8 @@ void connection_complete_async_io(struct connection *conn)
 	 */
 
 	size_t available_space = BUFSIZ - conn->header_len;
-	size_t read_size = conn->file_size < available_space ? conn->file_size : available_space;
+	size_t read_size = conn->file_size < available_space
+		? conn->file_size : available_space;
 
 	conn->send_len = conn->header_len + read_size;
 	conn->send_pos = 0;
@@ -404,9 +404,11 @@ void handle_client(uint32_t event, struct connection *conn)
 	/* TODO: Handle new client. There can be input and output connections.
 	 * Take care of what happened at the end of a connection.
 	 */
-	if (event & EPOLLIN)
+	unsigned int in = event & EPOLLIN;
+	unsigned int out = event & EPOLLOUT;
+	if (in)
 		handle_input(conn);
-	if (event & EPOLLOUT)
+	else if (out)
 		handle_output(conn);
 }
 
@@ -464,19 +466,16 @@ int main(void)
 			unsigned long cnt;
 			ssize_t r = read(efd, &cnt, sizeof(cnt));
 
-			if (r < 0 && errno != EAGAIN)
-				DIE(1, "read eventfd");
-
-			struct io_event events[128];
+			struct io_event *events = calloc(128, sizeof(struct io_event));
 			int nevents = io_getevents(ctx, 1, 128, events, NULL);
-
-			DIE(nevents < 0, "io_getevents");
 
 			for (int i = 0; i < nevents; i++) {
 				struct connection *conn = events[i].data;
 
 				connection_complete_async_io(conn);
 			}
+			free(events);
+
 		} else {
 			struct connection *conn = rev.data.ptr;
 
