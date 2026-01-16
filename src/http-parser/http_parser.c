@@ -1489,6 +1489,7 @@ size_t http_parser_execute (http_parser *parser,
           goto error;
         }
 
+        if (parser->content_length > (SIZE_MAX - (size_t)c) / 16) goto error;
         parser->content_length *= 16;
         parser->content_length += c;
         break;
@@ -1498,6 +1499,8 @@ size_t http_parser_execute (http_parser *parser,
       {
         assert(parser->flags & F_CHUNKED);
         /* just ignore this shit. TODO check for overflow */
+        /* urmarim marimea chunk ului sa prevenim overflow ul la citire */
+        if (++nread > HTTP_MAX_HEADER_SIZE) goto error;
         if (ch == CR) {
           state = s_chunk_size_almost_done;
           break;

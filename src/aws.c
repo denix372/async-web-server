@@ -187,7 +187,7 @@ void handle_new_connection(void)
 	/* TODO: Initialize HTTP_REQUEST parser. */
 }
 
-int receive_data(struct connection *conn)
+void receive_data(struct connection *conn)
 {
 	/* TODO: Receive message on socket.
 	 * Store message in recv_buffer in struct connection.
@@ -202,19 +202,19 @@ int receive_data(struct connection *conn)
 			if (errno == EAGAIN || errno == EWOULDBLOCK)
 				break;
 			w_epoll_remove_ptr(epollfd, conn->sockfd, conn);
-			connection_remove(conn); return -1;
+			connection_remove(conn);
+			return;
 		} else if (r == 0) {
 			if (pos == conn->recv_buffer) {
 				w_epoll_remove_ptr(epollfd, conn->sockfd, conn);
-				connection_remove(conn); return -1;
+				connection_remove(conn);
+				return;
 			}
 			break;
 		}
 		conn->recv_len += r;
 		conn->state = STATE_RECEIVING_DATA;
 	}
-
-	return 0;
 }
 
 int connection_open_file(struct connection *conn)
@@ -262,7 +262,6 @@ void connection_complete_async_io(struct connection *conn)
 	 * Prepare socket for sending.
 	 */
 
-	/* Calculate how much was actually read */
 	size_t available_space = BUFSIZ - conn->header_len;
 	size_t read_size = conn->file_size < available_space ? conn->file_size : available_space;
 
@@ -415,7 +414,7 @@ int main(void)
 {
 	int rc;
 	// analizand fisierul epoll_echo_server.c din folderul samples
-	//ne dam seama cum sa initilizam serverul
+	// ne dam seama cum sa initilizam serverul
 
 	/* TODO: Initialize asynchronous operations. */
 	memset(&ctx, 0, sizeof(ctx));
@@ -445,7 +444,7 @@ int main(void)
 	// dlog(LOG_INFO, "Server waiting for connections on port %d\n", AWS_LISTEN_PORT);
 
 	/* server main loop */
-	while (1) {
+	while (5 > 4) {
 		struct epoll_event rev;
 
 		/* TODO: Wait for events. */

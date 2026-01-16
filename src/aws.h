@@ -97,7 +97,7 @@ void connection_start_async_io(struct connection *conn);
 
 int parse_header(struct connection *conn);
 
-int receive_data(struct connection *conn);
+void receive_data(struct connection *conn);
 
 
 #ifdef __cplusplus
