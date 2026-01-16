@@ -24,6 +24,8 @@
 #include "utils/sock_util.h"
 #include "utils/w_epoll.h"
 
+#define MIN(a, b) ((a) < (b) ? (a) : (b))
+
 /* server socket file descriptor */
 static int listenfd;
 
@@ -97,9 +99,7 @@ static void connection_prepare_send_404(struct connection *conn)
 struct connection *connection_create(int sockfd)
 {
 	/* TODO: Initialize connection structure on given socket. */
-	struct connection *conn = calloc(1, sizeof(*conn));
-
-	DIE(conn == NULL, "calloc");
+	struct connection *conn = calloc(1, sizeof(struct connection *));
 
 	conn->sockfd = sockfd;
 	conn->fd = -1;
@@ -138,8 +138,9 @@ void connection_start_async_io(struct connection *conn)
 	conn->send_pos = 0;
 	conn->state = STATE_SENDING_DATA;
 
-	memset(&conn->iocb, 0, sizeof(struct iocb));
-	conn->piocb[0] = &conn->iocb;
+	struct iocb *cb = &conn->iocb;
+	*cb = (struct iocb){0};
+	conn->piocb[0] = cb;
 
 	io_prep_pread(conn->piocb[0], conn->fd, conn->send_buffer, 0, 0);
 	io_submit(ctx, 1, conn->piocb);
@@ -163,25 +164,34 @@ void connection_remove(struct connection *conn)
 void handle_new_connection(void)
 {
 	/* TODO: Handle a new connection request on the server socket. */
-	static int sockfd;
 	socklen_t addrlen = sizeof(struct sockaddr_in);
 	struct sockaddr_in addr;
 	struct connection *conn;
-	int rc, one = 1;
+	int sockfd, rc, one = 1;
 
 	/* TODO: Accept new connection. */
 	sockfd = accept(listenfd, (SSA *) &addr, &addrlen);
-	DIE(sockfd < 0, "accept");
+	if (sockfd < 0) {
+		perror("accept");
+		exit(EXIT_FAILURE);
+	}
 
 	/* TODO: Set socket to be non-blocking. */
-	rc = ioctl(sockfd, FIONBIO, &one); DIE(rc < 0, "ioctl FIONBIO");
+	rc = ioctl(sockfd, FIONBIO, &one);
+	if (rc < 0) {
+		perror("ioctl FIONBIO");
+		exit(EXIT_FAILURE);
+	}
 
 	/* TODO: Instantiate new connection handler. */
 	conn = connection_create(sockfd);
 
 	/* TODO: Add socket to epoll. */
 	rc = w_epoll_add_ptr_in(epollfd, sockfd, conn);
-	DIE(rc < 0, "w_epoll_add_in");
+	if (rc < 0) {
+		perror("w_epoll_add_in");
+		exit(EXIT_FAILURE);
+	}
 
 	/* TODO: Initialize HTTP_REQUEST parser. */
 }
@@ -260,10 +270,7 @@ void connection_complete_async_io(struct connection *conn)
 	/* TODO: Complete asynchronous operation; operation returns successfully.
 	 * Prepare socket for sending.
 	 */
-
-	size_t available_space = BUFSIZ - conn->header_len;
-	size_t read_size = conn->file_size < available_space
-		? conn->file_size : available_space;
+	unsigned long read_size = MIN(conn->file_size, BUFSIZ - conn->header_len);
 
 	conn->send_len = conn->header_len + read_size;
 	conn->send_pos = 0;
@@ -296,11 +303,8 @@ int parse_header(struct connection *conn)
 enum connection_state connection_send_static(struct connection *conn)
 {
 	/* TODO: Send static data using sendfile(2). */
-	ssize_t sent = sendfile(conn->sockfd, conn->fd, (off_t *)&conn->file_pos,
+	sendfile(conn->sockfd, conn->fd, (off_t *)&conn->file_pos,
 						conn->file_size - conn->file_pos);
-
-	if (sent < 0)
-		return STATE_CONNECTION_CLOSED;
 
 	if (conn->file_pos == conn->file_size)
 		return STATE_DATA_SENT;
@@ -344,9 +348,9 @@ void handle_input(struct connection *conn)
 	 * completion of an asynchronous I/O operation.
 	 */
 
-	if (conn->state == STATE_SENDING_HEADER ||
+	if (conn->state == STATE_SENDING_404 ||
 		conn->state == STATE_SENDING_DATA ||
-		conn->state == STATE_SENDING_404)
+		conn->state == STATE_SENDING_HEADER)
 		return;
 	receive_data(conn);
 	parse_header(conn);
@@ -369,33 +373,42 @@ void handle_output(struct connection *conn)
 	/* TODO: Handle output information: may be a new valid requests or notification of
 	 * completion of an asynchronous I/O operation or invalid requests.
 	 */
+	int rc;
+	int should_terminate = 0;
+	int buffer_processing_active = 1;
+
 	if (conn->send_pos < conn->send_len) {
-		int header_done = connection_send_data(conn);
+		rc = connection_send_data(conn);
 
-		if (header_done < 0) {
-			w_epoll_remove_ptr(epollfd, conn->sockfd, conn);
-			connection_remove(conn);
-			return;
+		if (rc < 0) {
+			should_terminate = 1;
+			buffer_processing_active = 0;
+		} else if (rc == 0) {
+			buffer_processing_active = 0;
+		} else {
+			buffer_processing_active = 1;
 		}
-
-		if (header_done == 0)
-			return;
 	}
 
-	if (conn->fd < 0 || conn->file_size == 0) {
-		w_epoll_remove_ptr(epollfd, conn->sockfd, conn);
-		connection_remove(conn);
-		return;
+	if (buffer_processing_active && !should_terminate) {
+		if (conn->fd < 0 || conn->file_size == 0) {
+			should_terminate = 1;
+		} else {
+			enum connection_state st = connection_send_static(conn);
+
+			if (st == STATE_DATA_SENT || st == STATE_CONNECTION_CLOSED) {
+				if (conn->fd >= 0) {
+					close(conn->fd);
+					conn->fd = -1;
+				}
+				should_terminate = 1;
+			}
+		}
 	}
 
-	enum connection_state st = connection_send_static(conn);
-
-	if (st == STATE_DATA_SENT || st == STATE_CONNECTION_CLOSED) {
-		close(conn->fd);
-		conn->fd = -1;
+	if (should_terminate) {
 		w_epoll_remove_ptr(epollfd, conn->sockfd, conn);
 		connection_remove(conn);
-		return;
 	}
 }
 
@@ -420,28 +433,46 @@ int main(void)
 	// ne dam seama cum sa initilizam serverul
 
 	/* TODO: Initialize asynchronous operations. */
-	memset(&ctx, 0, sizeof(ctx));
+	memset(&ctx, 0, sizeof(io_context_t));
 	rc = io_setup(128, &ctx);
-	DIE(rc < 0, "io_setup");
+	if (rc < 0) {
+		perror("io_setup");
+		exit(EXIT_FAILURE);
+	}
 
 	/* TODO: Initialize multiplexing. */
 	epollfd = w_epoll_create();
-	DIE(epollfd < 0, "w_epoll_create");
+	if (epollfd < 0) {
+		perror("w_epoll_create");
+		exit(EXIT_FAILURE);
+	}
 
 	efd = eventfd(0, EFD_NONBLOCK);
-	DIE(efd < 0, "eventfd");
+	if (efd < 0) {
+		perror("eventfd");
+		exit(EXIT_FAILURE);
+	}
 
 	rc = w_epoll_add_fd_in(epollfd, efd);
-	DIE(rc < 0, "w_epoll_add_fd_in");
+	if (rc < 0) {
+		perror("w_epoll_add_fd_in");
+		exit(EXIT_FAILURE);
+	}
 
 	/* TODO: Create server socket. */
 	listenfd = tcp_create_listener(AWS_LISTEN_PORT,
 		DEFAULT_LISTEN_BACKLOG);
-	DIE(listenfd < 0, "tcp_create_listener");
+	if (listenfd < 0) {
+		perror("tcp_create_listener");
+		exit(EXIT_FAILURE);
+	}
 
 	/* TODO: Add server socket to epoll object*/
 	rc = w_epoll_add_fd_in(epollfd, listenfd);
-	DIE(rc < 0, "w_epoll_add_fd_in");
+	if (rc < 0) {
+		perror("w_epoll_add_fd_in");
+		exit(EXIT_FAILURE);
+	}
 
 	/* Uncomment the following line for debugging. */
 	// dlog(LOG_INFO, "Server waiting for connections on port %d\n", AWS_LISTEN_PORT);
@@ -452,7 +483,10 @@ int main(void)
 
 		/* TODO: Wait for events. */
 		rc = w_epoll_wait_infinite(epollfd, &rev);
-		DIE(rc < 0, "w_epoll_wait_infinite");
+		if (rc < 0) {
+			perror("w_epoll_wait_infinite");
+			exit(EXIT_FAILURE);
+		}
 
 		/* TODO: Switch event types; consider
 		 *   - new connection requests (on server socket)
